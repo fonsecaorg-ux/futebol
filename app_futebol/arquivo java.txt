@@ -1,0 +1,339 @@
+/**
+ * ScoutPredict - Escanteios, Cartões & Gols (com Distribuição de Poisson)
+ * Versão atualizada com modelo estatístico para predição de placares e mercados de Gols.
+ */
+
+import React, { useEffect, useState, useMemo } from "react";
+
+// --- NOVAS CONSTANTES E FUNÇÕES MATEMÁTICAS (Fórmulas) ---
+const E = Math.exp(1); // Constante de Euler (e)
+
+/**
+ * Calcula o fatorial de um número (n!).
+ */
+function factorial(n) {
+  if (n === 0 || n === 1) return 1;
+  let result = 1;
+  for (let i = 2; i <= n; i++) result *= i;
+  return result;
+}
+
+/**
+ * Calcula a probabilidade de um time marcar k gols, dada uma média (lambda).
+ * Fórmula de Poisson: P(k; lambda) = (e^-lambda * lambda^k) / k!
+ */
+function poissonProbability(k, lambda) {
+  const safeLambda = Math.max(0.1, Math.min(4, lambda)); 
+  return (Math.pow(E, -safeLambda) * Math.pow(safeLambda, k)) / factorial(k);
+}
+
+function clamp(v, a = 0, b = 100) { return Math.max(a, Math.min(b, v)); }
+// ---------------------------------------------
+
+
+const LEAGUES = [
+  { id: "italy-serie-a", name: "Série A TIM (Itália)" },
+  { id: "spain-laliga", name: "La Liga (Espanha)" },
+  { id: "germany-bundesliga", name: "Bundesliga (Alemanha)" },
+  { id: "france-ligue1", name: "Ligue 1 (França)" },
+  { id: "england-premier", name: "Premier League (Inglaterra)" },
+  { id: "brazil-serie-a", name: "Série A (Brasil)" },
+];
+
+function computeProbabilitiesForTeam(stats) {
+  const corner35 = 3.5, corner45 = 4.5, cards15 = 1.5;
+  const baseCornerScore = (stats.avgCornersFor - corner35) * 12 + (stats.avgCornersFor - stats.avgCornersAgainst) * 6;
+  const pCorner35 = clamp(50 + baseCornerScore, 5, 98);
+  const baseCorner45 = (stats.avgCornersFor - corner45) * 12 + (stats.avgCornersFor - stats.avgCornersAgainst) * 5;
+  const pCorner45 = clamp(40 + baseCorner45, 3, 97);
+  const baseCards = (stats.avgCardsFor - cards15) * 25 + (stats.avgCardsFor) * 8;
+  const pCards15 = clamp(35 + baseCards, 2, 96);
+  return { corner35: Math.round(pCorner35), corner45: Math.round(pCorner45), cards15: Math.round(pCards15) };
+}
+
+function computeGoalPredictions(homeStats, awayStats) {
+  const lambdaHome = (homeStats.avgGoalsFor + awayStats.avgGoalsAgainst) / 2;
+  const lambdaAway = (awayStats.avgGoalsFor + homeStats.avgGoalsAgainst) / 2;
+
+  const SCORE_LIMIT = 5; 
+  const scoreProbabilities = [];
+  let pOver15Total = 0; 
+  let pOver25Total = 0;
+  let pWinHome = 0;
+  let pDraw = 0;
+  let pWinAway = 0;
+  
+  for (let h = 0; h < SCORE_LIMIT; h++) {
+    scoreProbabilities[h] = [];
+    for (let a = 0; a < SCORE_LIMIT; a++) {
+      const pScore = poissonProbability(h, lambdaHome) * poissonProbability(a, lambdaAway);
+      scoreProbabilities[h][a] = +(pScore * 100).toFixed(2);
+
+      if (h + a > 1) pOver15Total += pScore;
+      if (h + a > 2) pOver25Total += pScore;
+      if (h > a) pWinHome += pScore;
+      if (h === a) pDraw += pScore;
+      if (h < a) pWinAway += pScore;
+    }
+  }
+
+  const pHomeNotScore = scoreProbabilities[0].reduce((acc, p) => acc + (p / 100), 0);
+  const pAwayNotScore = scoreProbabilities.reduce((acc, row) => acc + (row[0] / 100), 0);
+  
+  const pOver05Home = clamp((1 - pHomeNotScore) * 100, 5, 98);
+  const pOver05Away = clamp((1 - pAwayNotScore) * 100, 5, 98);
+
+  return {
+    placar: scoreProbabilities,
+    over15Total: Math.round(pOver15Total * 100),
+    over25Total: Math.round(pOver25Total * 100),
+    over05Home: Math.round(pOver05Home),
+    over05Away: Math.round(pOver05Away),
+    pWinHome: Math.round(pWinHome * 100),
+    pDraw: Math.round(pDraw * 100),
+    pWinAway: Math.round(pWinAway * 100),
+  };
+}
+
+
+function makeMockMatch(id, league, home, away, dateOffsetDays = 0) {
+  const randomAvg = (min, max) => +(Math.random() * (max - min) + min).toFixed(2);
+  const homeStats = {
+    avgGoalsFor: randomAvg(1.2, 2.1),
+    avgGoalsAgainst: randomAvg(0.8, 1.8),
+    avgCornersFor: randomAvg(2.5, 6.5),
+    avgCornersAgainst: randomAvg(2.0, 5.0),
+    avgCardsFor: randomAvg(0.8, 2.2),
+    last5: Array.from({ length: 5 }, () => ({ corners: Math.floor(Math.random() * 8), cards: Math.floor(Math.random() * 4) })),
+  };
+  const awayStats = {
+    avgGoalsFor: randomAvg(1.0, 1.9),
+    avgGoalsAgainst: randomAvg(1.0, 2.0),
+    avgCornersFor: randomAvg(2.0, 6.0),
+    avgCornersAgainst: randomAvg(2.0, 5.5),
+    avgCardsFor: randomAvg(0.7, 2.0),
+    last5: Array.from({ length: 5 }, () => ({ corners: Math.floor(Math.random() * 8), cards: Math.floor(Math.random() * 4) })),
+  };
+  return {
+    id,
+    league,
+    date: new Date(Date.now() + dateOffsetDays * 24 * 60 * 60 * 1000).toISOString(),
+    home: { name: home, stats: homeStats },
+    away: { name: away, stats: awayStats },
+  };
+}
+
+function getBestScore(placarMatrix) {
+    let maxP = -1;
+    let bestScore = "N/A";
+    for (let h = 0; h < placarMatrix.length; h++) {
+        for (let a = 0; a < placarMatrix[h].length; a++) {
+            if (placarMatrix[h][a] > maxP) {
+                maxP = placarMatrix[h][a];
+                bestScore = `${h}-${a}`;
+            }
+        }
+    }
+    return { score: bestScore, p: maxP };
+}
+
+function pickBestOpportunity(homePred, awayPred, goalPred) {
+    const bestScore = getBestScore(goalPred.placar);
+    
+    const items = [
+      { team: "home", market: "+3.5 escanteios", p: homePred.corner35 },
+      { team: "home", market: "+1.5 cartões", p: homePred.cards15 },
+      { team: "away", market: "+3.5 escanteios", p: awayPred.corner35 },
+      { team: "away", market: "+1.5 cartões", p: awayPred.cards15 },
+      { team: "total", market: "+1.5 Gols", p: goalPred.over15Total },
+      { team: "total", market: "Placar: "+bestScore.score, p: bestScore.p },
+    ];
+    items.sort((a, b) => b.p - a.p);
+    return items[0];
+  }
+
+
+export default function ScoutPredict() {
+  const [matches, setMatches] = useState([]);
+  const [leagueFilter, setLeagueFilter] = useState(LEAGUES[0].id);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [history, setHistory] = useState([]);
+
+  async function loadMatches() {
+    setLoading(true);
+    try {
+      const generated = [];
+      let id = 1;
+      LEAGUES.forEach((l) => {
+        for (let i = 0; i < 6; i++) {
+          const home = `Time ${l.id.split("-")[0]}_${i * 2 + 1}`;
+          const away = `Time ${l.id.split("-")[0]}_${i * 2 + 2}`;
+          generated.push(makeMockMatch(`${id++}`, l.id, home, away, i - 1));
+        }
+      });
+      setMatches(generated);
+    } catch (err) {
+      console.error("Erro ao carregar partidas:", err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { loadMatches(); }, []);
+
+  const matchesWithPredictions = useMemo(() => {
+    return matches.map((m) => {
+      const h = computeProbabilitiesForTeam(m.home.stats);
+      const a = computeProbabilitiesForTeam(m.away.stats);
+      const goals = computeGoalPredictions(m.home.stats, m.away.stats); 
+      const summary = pickBestOpportunity(h, a, goals);
+      return { ...m, predictions: { home: h, away: a, goals, suggestion: summary } };
+    });
+  }, [matches]);
+
+  function onUpdateData() { loadMatches(); }
+  function onSaveToHistory(match) {
+    setHistory((s) => [{ timestamp: new Date().toISOString(), matchId: match.id, match, predictions: match.predictions }, ...s]);
+  }
+  
+  function exportCSV(filteredMatches) {
+    const rows = [];
+    rows.push(["League", "Date", "Match", "Market", "Team", "Probability"]);
+    filteredMatches.forEach((m) => {
+      const date = new Date(m.date).toLocaleString();
+      const pushRow = (teamName, market, p) => rows.push([m.league, date, `${m.home.name} x ${m.away.name}`, market, teamName, `${p}%`]);
+      pushRow(m.home.name, "+3.5 escanteios", m.predictions.home.corner35);
+      pushRow(m.home.name, "+4.5 escanteios", m.predictions.home.corner45);
+      pushRow(m.home.name, "+1.5 cartões", m.predictions.home.cards15);
+      pushRow(m.away.name, "+3.5 escanteios", m.predictions.away.corner35);
+      pushRow(m.away.name, "+4.5 escanteios", m.predictions.away.corner45);
+      pushRow(m.away.name, "+1.5 cartões", m.predictions.away.cards15);
+      pushRow('Total', '+1.5 Gols', m.predictions.goals.over15Total);
+      pushRow('Total', '+2.5 Gols', m.predictions.goals.over25Total);
+      pushRow(m.home.name, 'Vitória (1)', m.predictions.goals.pWinHome);
+      pushRow('Empate (X)', 'Empate (X)', m.predictions.goals.pDraw);
+    });
+    const csvContent = rows.map((r) => r.map((c) => `\"${String(c).replace(/\"/g, '\"\"')}\"`).join(',')).join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'scoutpredict_export.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const filtered = matchesWithPredictions.filter((m) => m.league === leagueFilter && (m.home.name.toLowerCase().includes(query.toLowerCase()) || m.away.name.toLowerCase().includes(query.toLowerCase())));
+
+  return (
+    <div className="app">
+      <header className="header">
+        <h1>ScoutPredict — Escanteios, Cartões & Gols</h1>
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={onUpdateData} style={{padding:'8px 12px',borderRadius:8}}>Atualizar Dados</button>
+          <button onClick={() => exportCSV(filtered)} style={{padding:'8px 12px',borderRadius:8}}>Exportar CSV</button>
+        </div>
+      </header>
+
+      <section style={{display:'flex',gap:8,marginBottom:12}}>
+        <select value={leagueFilter} onChange={(e)=>setLeagueFilter(e.target.value)} style={{padding:8,borderRadius:8,background:'#0f1724',color:'#e6eef6'}}>
+          {LEAGUES.map(l=> <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
+        <input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="Buscar time..." style={{padding:8,borderRadius:8,background:'#0f1724',color:'#e6eef6',flex:1}} />
+      </section>
+
+      <main style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:12}}>
+        {loading && <div className="card">Carregando partidas...</div>}
+        {filtered.map((m) => (
+          <article key={m.id} className="card">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div>
+                <div style={{fontSize:12,color:'#9aa6b2'}}>{LEAGUES.find(l => l.id === m.league)?.name}</div>
+                <div style={{fontSize:18,fontWeight:700}}>{m.home.name} <span style={{color:'#9aa6b2'}}>x</span> {m.away.name}</div>
+                <div style={{fontSize:12,color:'#9aa6b2'}}>{new Date(m.date).toLocaleString()}</div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:12}}>Sugestão:</div>
+                <div style={{fontWeight:800}}>
+                  {m.predictions.suggestion.team === 'total' ? 'Total ' : (m.predictions.suggestion.team === 'home' ? m.home.name + ' ' : m.away.name + ' ')}
+                  {m.predictions.suggestion.market} ({m.predictions.suggestion.p}%)
+                </div>
+              </div>
+            </div>
+
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginTop:12}}>
+              <PredictionCard team={m.home} preds={m.predictions.home} overallGoals={m.predictions.goals} isHome={true} />
+              <PredictionCard team={m.away} preds={m.predictions.away} overallGoals={m.predictions.goals} isHome={false} />
+            </div>
+
+            <GoalPredictionSummary overallGoals={m.predictions.goals} homeName={m.home.name} awayName={m.away.name}/>
+            
+            <div style={{display:'flex',gap:8,marginTop:12}}>
+              <button onClick={() => onSaveToHistory(m)} style={{padding:'8px 10px',borderRadius:8, background:'#48bb78'}}>Salvar histórico</button>
+              <button onClick={() => alert('Detalhes não implementados no demo')} style={{padding:'8px 10px',borderRadius:8}}>Ver detalhes</button>
+            </div>
+          </article>
+        ))}
+      </main>
+      
+      {history.length > 0 && (
+          <div style={{marginTop:20}}>
+            <h2>Histórico Salvo ({history.length})</h2>
+            <div className="card" style={{fontSize:14, whiteSpace:'pre-wrap', maxHeight: '200px', overflowY: 'auto'}}>
+              {JSON.stringify(history.slice(0, 5), null, 2)}
+            </div>
+          </div>
+        )}
+    </div>
+  );
+}
+
+function PredictionCard({ team, preds, overallGoals, isHome }) {
+  return (
+    <div style={{padding:12,background:'#0b1320',borderRadius:8}}>
+      <div style={{fontWeight:700,marginBottom:6}}>{team.name}</div>
+      <Metric label={"+3.5 escanteios"} value={preds.corner35} />
+      <Metric label={"+4.5 escanteios"} value={preds.corner45} />
+      <Metric label={"+1.5 cartões"} value={preds.cards15} />
+
+      <div style={{height:1,background:'rgba(255,255,255,0.1)',margin:'8px 0'}}></div>
+      <div style={{fontWeight:700,marginBottom:6,color: isHome ? '#48bb78' : '#63b3ed'}}>Gols Esperados</div>
+      <Metric label={"+0.5 Gols"} value={isHome ? overallGoals.over05Home : overallGoals.over05Away} />
+      <Metric label={isHome ? "Vitória (1)" : "Derrota (2)"} value={isHome ? overallGoals.pWinHome : overallGoals.pWinAway} />
+    </div>
+  );
+}
+
+function GoalPredictionSummary({ overallGoals, homeName, awayName }) {
+    const bestScore = getBestScore(overallGoals.placar);
+    return (
+        <div style={{marginTop:12, padding:12, background:'#152233', borderRadius:8}}>
+            <div style={{fontWeight:700, marginBottom:8, fontSize:16, color:'#63b3ed'}}>Resumo de Gols (Poisson)</div>
+            <div style={{display:'flex', justifyContent:'space-between', marginBottom:10}}>
+                <div style={{flex:1, textAlign:'center'}}>
+                    <div style={{fontSize:12, color:'#9aa6b2'}}>Placar Mais Provável</div>
+                    <div style={{fontWeight:900, fontSize:22, color:'#48bb78'}}>{bestScore.score}</div>
+                    <div style={{fontSize:12, color:'#9aa6b2'}}>Probabilidade: {bestScore.p}%</div>
+                </div>
+                <div style={{width:1, background:'rgba(255,255,255,0.1)'}}></div>
+                <div style={{flex:1, paddingLeft:15}}>
+                    <Metric label={"+1.5 Gols Total"} value={overallGoals.over15Total} />
+                    <Metric label={"+2.5 Gols Total"} value={overallGoals.over25Total} />
+                    <Metric label={"Empate (X)"} value={overallGoals.pDraw} />
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function Metric({ label, value }) {
+  return (
+    <div style={{marginBottom:8}}>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:13,color:'#cbd5e1'}}><span>{label}</span><span style={{fontWeight:800}}>{value}%</span></div>
+      <div style={{height:10,background:'#071827',borderRadius:8,overflow:'hidden',marginTop:6}}>
+        <div style={{width:`${value}%`,height:'100%',background:'linear-gradient(90deg,#2563eb,#0ea5a4)'}}></div>
+      </div>
+    </div>
+  );
+}
