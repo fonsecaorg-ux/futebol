@@ -1,40 +1,34 @@
-# .github/workflows/deploy.yml
-name: Deploy para GitHub Pages
+name: Robô Noturno - Atualizador
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+  schedule:
+    - cron: "0 10 * * *"   # roda todo dia às 7h de Brasília (10h UTC)
+  workflow_dispatch:        # permite rodar manualmente
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout do código
-        uses: actions/checkout@v4
-        
-      - name: Configurar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
         with:
-          node-version: '20'
-          
-      - name: Cache de dependências do NPM
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-            
-      - name: Instalar dependências e Build (npm run build)
+          python-version: "3.9"
+
+      - name: Instalar Dependências
         run: |
-          npm install
-          npm run build
-          
-      - name: Deploy para GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
+          pip install cloudscraper
+
+      - name: Executar o Robô
+        run: python atualizador.py
+
+      - name: Salvar Mudanças
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Atualização automática dos JSONs"
+          git push
